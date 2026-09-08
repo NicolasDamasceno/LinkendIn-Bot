@@ -568,6 +568,9 @@ import telegram_client
 
 BASE_DIR = os.path.dirname(__file__)
 PENDING_POST_FILE = os.path.join(BASE_DIR, "pending_post.json")
+# Mantenha idêntico ao NOTES_TEMPLATE_HEADER em check_approval.py — read_notes()
+# aqui só remove o cabeçalho se o texto bater exatamente com o que
+# truncate_notes() (no outro script) escreve.
 NOTES_TEMPLATE_HEADER = (
     "<!-- Escreva livremente durante a semana. "
     "Cada linha vira contexto pro rascunho de sexta. -->\n"
@@ -651,8 +654,6 @@ def main():
 
     pending = load_pending_post(PENDING_POST_FILE)
     if pending and pending["status"] == "aguardando_aprovacao":
-        from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
-
         msg = (
             f"Ainda tem um post pendente de aprovação de {pending['created_at']} — "
             "aprove, edite ou cancele antes de gerar um novo."
@@ -660,6 +661,10 @@ def main():
         if args.dry_run:
             print(msg)
         else:
+            # Importado só aqui dentro: o caminho --dry-run desse branch não
+            # precisa de nenhum valor de config.py.
+            from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+
             telegram_client.send_message(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, msg)
         return
 
@@ -749,7 +754,14 @@ Expected: `OK`.
 
 - [ ] **Step 4: Verify — `fetch_recent_commits` against the real, public GitHub API, using this actual repo**
 
-This repo has had real commits today from `NicolasDamasceno`, so this is a genuine live check, not a mock.
+This hits the real GitHub API (no mock). Note the dependency this has on timing:
+this plan's own commits (Chunks 1-2) are only local until Task 8's final
+`git push` — they are **not** on GitHub yet at this point in the plan. This
+check only sees commits from `NicolasDamasceno` that were pushed to this
+repo's remote *before* this step runs, from activity outside this plan. So
+don't treat a `0` count as a failure of the function — treat it as "no
+matching commits happen to be on the remote right now," and confirm the
+function itself behaves correctly either way.
 
 Run:
 ```bash
@@ -757,13 +769,18 @@ cd linkedin-post-bot && python -c "
 import generate_post as gp
 
 commits = gp.fetch_recent_commits(['NicolasDamasceno/LinkendIn-Bot'], 'NicolasDamasceno', '')
+assert isinstance(commits, list)
 print(f'{len(commits)} commit(s) found')
-assert len(commits) > 0, 'expected at least one commit from today'
-print(commits[0])
+if commits:
+    assert commits[0].startswith('[NicolasDamasceno/LinkendIn-Bot]'), commits[0]
+    print(commits[0])
 print('OK')
 "
 ```
-Expected: a count greater than 0, one example commit line prefixed `[NicolasDamasceno/LinkendIn-Bot]`, then `OK`.
+Expected: `OK`, with a commit count of 0 or more — a non-zero count (likely,
+since this specific repo has had real pushed activity recently) additionally
+confirms parsing of real GitHub response data; a zero count still confirms
+the function completes without raising and returns the right type.
 
 - [ ] **Step 5: Verify — pending-post reminder path runs without `config.py`, when a pending post is faked**
 
@@ -783,11 +800,18 @@ sys.argv = ['generate_post.py', '--dry-run']
 gp.main()
 "
 ```
-Expected: prints the "ainda tem um post pendente" reminder message, no crash (note: this creates a real `linkedin-post-bot/pending_post.json` as a side effect — delete it afterward with `rm linkedin-post-bot/pending_post.json` before Task 6's verification, so it doesn't interfere).
+Expected: prints the "ainda tem um post pendente" reminder message, no crash.
 
 Note: `build_draft()` itself — the actual Claude API call — requires the user's real `ANTHROPIC_API_KEY` and is not exercised by any step in this plan. It's verified by the user's manual QA pass (spec §13), the same way the LinkedIn OAuth consent screen in Chunk 1 was.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Clean up the `pending_post.json` created by Step 5**
+
+Step 5 created a real `linkedin-post-bot/pending_post.json` as a side effect. Remove it now so it doesn't interfere with Task 6's verification (which checks for the *absence* of a pending post).
+
+Run: `rm linkedin-post-bot/pending_post.json`
+Expected: no output; `ls linkedin-post-bot/pending_post.json` afterward reports the file doesn't exist.
+
+- [ ] **Step 7: Commit**
 
 ```bash
 git add linkedin-post-bot/generate_post.py
@@ -829,6 +853,9 @@ BASE_DIR = os.path.dirname(__file__)
 PENDING_POST_FILE = os.path.join(BASE_DIR, "pending_post.json")
 TOKEN_FILE = os.path.join(BASE_DIR, "linkedin_token.json")
 OFFSET_FILE = os.path.join(BASE_DIR, "telegram_offset.json")
+# Mantenha idêntico ao NOTES_TEMPLATE_HEADER em generate_post.py — é o que
+# read_notes() (no outro script) espera encontrar e remover no início do
+# arquivo.
 NOTES_TEMPLATE_HEADER = (
     "<!-- Escreva livremente durante a semana. "
     "Cada linha vira contexto pro rascunho de sexta. -->\n"
@@ -902,11 +929,17 @@ def main():
 
     reply_text, next_offset = find_reply(updates, TELEGRAM_CHAT_ID)
 
-    if not args.dry_run and next_offset is not None:
-        save_json(OFFSET_FILE, {"last_update_id": next_offset - 1})
-
     if reply_text is None:
         return  # nada novo ainda; próxima checagem em 15 min
+
+    def advance_offset():
+        # Só avança o offset numa resolução terminal (cancelado/publicado).
+        # Se ficar sem avançar, a MESMA mensagem do Telegram é relida (e
+        # reclassificada) na próxima checagem — é assim que uma falha de
+        # publicação "tenta de novo com o mesmo texto" sem precisar
+        # persistir o texto de substituição em lugar nenhum.
+        if not args.dry_run and next_offset is not None:
+            save_json(OFFSET_FILE, {"last_update_id": next_offset - 1})
 
     action, replacement_text = classify_reply(reply_text)
     notes_path = os.path.join(BASE_DIR, NOTES_FILE)
@@ -918,6 +951,7 @@ def main():
         pending["status"] = "cancelado"
         save_json(PENDING_POST_FILE, pending)
         truncate_notes(notes_path)
+        advance_offset()
         telegram_client.send_message(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, "Post cancelado.")
         return
 
@@ -929,6 +963,9 @@ def main():
 
     token_data = load_json(TOKEN_FILE, None)
     if not token_data:
+        # Offset NÃO avança: sem token não há como publicar, então a mesma
+        # resposta do usuário é relida e reprocessada na próxima checagem,
+        # até authorize_linkedin.py ser rodado e o pending ser resolvido.
         telegram_client.send_message(
             TELEGRAM_BOT_TOKEN,
             TELEGRAM_CHAT_ID,
@@ -941,6 +978,10 @@ def main():
             token_data["access_token"], token_data["author_urn"], text_to_publish
         )
     except requests.HTTPError as e:
+        # Offset NÃO avança nos dois ramos abaixo: pending_post.json continua
+        # aguardando_aprovacao, e a mesma resposta do Telegram (com o mesmo
+        # texto a publicar) é reprocessada na próxima checagem — exatamente
+        # o "retried on the next 15-minute run" da spec §11.
         if e.response is not None and e.response.status_code == 401:
             telegram_client.send_message(
                 TELEGRAM_BOT_TOKEN,
@@ -964,6 +1005,7 @@ def main():
     pending["published_at"] = datetime.now().isoformat()
     save_json(PENDING_POST_FILE, pending)
     truncate_notes(notes_path)
+    advance_offset()
     telegram_client.send_message(
         TELEGRAM_BOT_TOKEN,
         TELEGRAM_CHAT_ID,
