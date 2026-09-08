@@ -1,0 +1,15 @@
+# Segredos e dados locais do bot de vagas
+config.py
+sent_jobs.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+
+# Editores/SO
+.vscode/
+.idea/
+.DS_Store
