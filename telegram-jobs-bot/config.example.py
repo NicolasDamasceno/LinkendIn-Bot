@@ -15,9 +15,25 @@ TELEGRAM_CHAT_ID = "SEU_CHAT_ID_AQUI"
 # para ela ser considerada um "match" com o seu perfil.
 # Dica: use termos específicos (cargo, tecnologias, área) para reduzir ruído.
 KEYWORDS = [
+    # React / Front-end
+    "React",
+    "React.js",
+    "ReactJS",
+    "Front-end React",
+    "Frontend React",
+    # React Native / Mobile
+    "React Native",
+    "Mobile Developer",
+    # .NET
+    ".NET",
+    "C#",
+    "ASP.NET",
+    "Dotnet",
+    # Python / automações
     "Python",
-    "Analista de Dados",
-    "Marketing Digital",
+    "Automação Python",
+    "Python Developer",
+    "RPA",
 ]
 
 # (opcional) Se quiser, pode adicionar um segundo filtro por localização.
