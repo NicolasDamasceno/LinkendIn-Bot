@@ -532,3 +532,704 @@ git commit -m "feat: add one-time LinkedIn OAuth authorization script"
 ---
 
 **End of Chunk 1.** Dispatch the plan-document-reviewer subagent for this chunk before continuing to Chunk 2.
+
+---
+
+## Chunk 2: Weekly scripts, documentation, integration
+
+**Design note carried over from Chunk 1:** both scripts below defer `from config import (...)` to inside `main()`, and as late as possible within `main()` — after any check that doesn't actually need a config value (the "already-pending" check in `generate_post.py`, the weekday gate and the "no pending post" check in `check_approval.py`). This keeps every module importable, and several real code paths live-runnable, without a `config.py` present — same reasoning Chunk 1 applied to `authorize_linkedin.py` after review. It also means `read_notes`, `fetch_recent_commits`, `write_pending_post`, `classify_reply`, and `find_reply` all take their inputs as plain parameters instead of reading config globals directly — easier to test in isolation, and the config values only get threaded through once, in `main()`.
+
+**Correction to spec §8 found while writing this chunk:** `get_member_urn()` (Chunk 1, `linkedin_client.py`) calls `GET /v2/userinfo`, which requires the `openid` and `profile` scopes. Those come from a **second, separate** LinkedIn Developer Portal product — "Sign In with LinkedIn using OpenID Connect" — distinct from "Share on LinkedIn" (which grants `w_member_social`, used for §8's original step 2). Spec §8 only mentioned requesting "Share on LinkedIn". This is a correction, not a new decision: without both products requested, `authorize_linkedin.py` runs but `get_member_urn()` fails with a 403 during setup. Task 7 documents both.
+
+### Task 5: `generate_post.py`
+
+**Files:**
+- Create: `linkedin-post-bot/generate_post.py`
+
+- [ ] **Step 1: Write the file**
+
+```python
+"""Gera o rascunho semanal de post do LinkedIn e envia para aprovação no Telegram.
+
+Uso:
+    python generate_post.py            # fluxo normal (roda via cron às sextas 17h)
+    python generate_post.py --dry-run  # gera e imprime o rascunho, sem enviar nem salvar estado
+"""
+
+import argparse
+import json
+import os
+from datetime import datetime, timedelta
+
+import anthropic
+import requests
+
+import telegram_client
+
+BASE_DIR = os.path.dirname(__file__)
+PENDING_POST_FILE = os.path.join(BASE_DIR, "pending_post.json")
+NOTES_TEMPLATE_HEADER = (
+    "<!-- Escreva livremente durante a semana. "
+    "Cada linha vira contexto pro rascunho de sexta. -->\n"
+)
+
+
+def load_pending_post(path):
+    if not os.path.exists(path):
+        return None
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def read_notes(notes_path):
+    if not os.path.exists(notes_path):
+        return ""
+    with open(notes_path, "r", encoding="utf-8") as f:
+        content = f.read()
+    return content.replace(NOTES_TEMPLATE_HEADER, "").strip()
+
+
+def fetch_recent_commits(repos, username, token):
+    """Busca commits dos últimos 7 dias do `username` em cada repo de `repos`."""
+    since = (datetime.utcnow() - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    commits = []
+    for repo in repos:
+        try:
+            resp = requests.get(
+                f"https://api.github.com/repos/{repo}/commits",
+                params={"since": since, "author": username},
+                headers=headers,
+                timeout=15,
+            )
+            resp.raise_for_status()
+            for item in resp.json():
+                message = item.get("commit", {}).get("message", "").splitlines()[0]
+                commits.append(f"[{repo}] {message}")
+        except Exception as e:
+            print(f"[aviso] Erro ao buscar commits de {repo}: {e}")
+    return commits
+
+
+def build_draft(notes_text, commits, api_key, model, system_prompt):
+    material = "Anotações da semana:\n"
+    material += notes_text if notes_text else "(nenhuma anotação)"
+    material += "\n\nCommits recentes:\n"
+    material += "\n".join(f"- {c}" for c in commits) if commits else "(nenhum commit)"
+
+    client = anthropic.Anthropic(api_key=api_key)
+    response = client.messages.create(
+        model=model,
+        max_tokens=2000,
+        system=system_prompt,
+        messages=[{"role": "user", "content": material}],
+    )
+    return "".join(block.text for block in response.content if block.type == "text").strip()
+
+
+def write_pending_post(path, draft_text, telegram_message_id):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "status": "aguardando_aprovacao",
+                "draft_text": draft_text,
+                "created_at": datetime.now().isoformat(),
+                "telegram_message_id": telegram_message_id,
+                "linkedin_post_urn": None,
+                "published_at": None,
+            },
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+
+    pending = load_pending_post(PENDING_POST_FILE)
+    if pending and pending["status"] == "aguardando_aprovacao":
+        from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+
+        msg = (
+            f"Ainda tem um post pendente de aprovação de {pending['created_at']} — "
+            "aprove, edite ou cancele antes de gerar um novo."
+        )
+        if args.dry_run:
+            print(msg)
+        else:
+            telegram_client.send_message(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, msg)
+        return
+
+    from config import (
+        ANTHROPIC_API_KEY,
+        CLAUDE_MODEL,
+        GITHUB_REPOS,
+        GITHUB_TOKEN,
+        GITHUB_USERNAME,
+        NOTES_FILE,
+        POST_SYSTEM_PROMPT,
+        TELEGRAM_BOT_TOKEN,
+        TELEGRAM_CHAT_ID,
+    )
+
+    notes_text = read_notes(os.path.join(BASE_DIR, NOTES_FILE))
+    commits = fetch_recent_commits(GITHUB_REPOS, GITHUB_USERNAME, GITHUB_TOKEN)
+
+    if not notes_text and not commits:
+        msg = "Sem novidades essa semana — pulando o post."
+        if args.dry_run:
+            print(msg)
+        else:
+            telegram_client.send_message(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, msg)
+        return
+
+    try:
+        draft_text = build_draft(notes_text, commits, ANTHROPIC_API_KEY, CLAUDE_MODEL, POST_SYSTEM_PROMPT)
+    except Exception as e:
+        msg = f"[erro] Falha ao gerar o rascunho com a Claude API: {e}"
+        print(msg)
+        if not args.dry_run:
+            telegram_client.send_message(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, msg)
+        return
+
+    if args.dry_run:
+        print("--- RASCUNHO (dry-run, nada foi enviado ou salvo) ---")
+        print(draft_text)
+        return
+
+    message_text = (
+        f"📝 Rascunho do post desta semana:\n\n{draft_text}\n\n"
+        "Responda:\n"
+        "• \"aprovar\" — publica como está\n"
+        "• \"cancelar\" — pula essa semana\n"
+        "• qualquer outro texto — publica ESSE texto no lugar do rascunho"
+    )
+    try:
+        sent = telegram_client.send_message(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, message_text)
+    except Exception as e:
+        print(f"[erro] Falha ao enviar o rascunho pro Telegram: {e}")
+        return
+
+    write_pending_post(PENDING_POST_FILE, draft_text, sent["message_id"])
+
+
+if __name__ == "__main__":
+    main()
+```
+
+- [ ] **Step 2: Verify — syntax**
+
+Run: `python -m py_compile linkedin-post-bot/generate_post.py`
+Expected: no output, exit code 0.
+
+- [ ] **Step 3: Verify — `read_notes` against a real temp file, no config needed**
+
+Run:
+```bash
+cd linkedin-post-bot && python -c "
+import tempfile, os
+import generate_post as gp
+
+with tempfile.NamedTemporaryFile('w', suffix='.md', delete=False, encoding='utf-8') as f:
+    f.write(gp.NOTES_TEMPLATE_HEADER)
+    f.write('- fiz X\n- fiz Y\n')
+    path = f.name
+
+result = gp.read_notes(path)
+os.unlink(path)
+assert result == '- fiz X\n- fiz Y', repr(result)
+assert gp.read_notes('/nonexistent/path.md') == ''
+print('OK')
+"
+```
+Expected: `OK`.
+
+- [ ] **Step 4: Verify — `fetch_recent_commits` against the real, public GitHub API, using this actual repo**
+
+This repo has had real commits today from `NicolasDamasceno`, so this is a genuine live check, not a mock.
+
+Run:
+```bash
+cd linkedin-post-bot && python -c "
+import generate_post as gp
+
+commits = gp.fetch_recent_commits(['NicolasDamasceno/LinkendIn-Bot'], 'NicolasDamasceno', '')
+print(f'{len(commits)} commit(s) found')
+assert len(commits) > 0, 'expected at least one commit from today'
+print(commits[0])
+print('OK')
+"
+```
+Expected: a count greater than 0, one example commit line prefixed `[NicolasDamasceno/LinkendIn-Bot]`, then `OK`.
+
+- [ ] **Step 5: Verify — pending-post reminder path runs without `config.py`, when a pending post is faked**
+
+`build_draft` (the only function that needs `ANTHROPIC_API_KEY`) is not reachable in this path, so this exercises real control flow with zero secrets.
+
+Run:
+```bash
+cd linkedin-post-bot && python -c "
+import json
+import generate_post as gp
+
+with open(gp.PENDING_POST_FILE, 'w', encoding='utf-8') as f:
+    json.dump({'status': 'aguardando_aprovacao', 'draft_text': 'x', 'created_at': 'now'}, f)
+
+import sys
+sys.argv = ['generate_post.py', '--dry-run']
+gp.main()
+"
+```
+Expected: prints the "ainda tem um post pendente" reminder message, no crash (note: this creates a real `linkedin-post-bot/pending_post.json` as a side effect — delete it afterward with `rm linkedin-post-bot/pending_post.json` before Task 6's verification, so it doesn't interfere).
+
+Note: `build_draft()` itself — the actual Claude API call — requires the user's real `ANTHROPIC_API_KEY` and is not exercised by any step in this plan. It's verified by the user's manual QA pass (spec §13), the same way the LinkedIn OAuth consent screen in Chunk 1 was.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add linkedin-post-bot/generate_post.py
+git commit -m "feat: add weekly draft generation script for linkedin-post-bot"
+```
+
+---
+
+### Task 6: `check_approval.py`
+
+**Files:**
+- Create: `linkedin-post-bot/check_approval.py`
+
+- [ ] **Step 1: Write the file**
+
+```python
+"""Verifica aprovação do post pendente e publica no LinkedIn.
+
+Roda via cron a cada 15 minutos; só faz algo às sextas-feiras (a menos
+que --force seja passado).
+
+Uso:
+    python check_approval.py             # fluxo normal (cron)
+    python check_approval.py --force     # ignora a checagem de dia da semana
+    python check_approval.py --dry-run   # mostra o que seria publicado, sem publicar
+"""
+
+import argparse
+import json
+import os
+from datetime import datetime
+
+import requests
+
+import linkedin_client
+import telegram_client
+
+BASE_DIR = os.path.dirname(__file__)
+PENDING_POST_FILE = os.path.join(BASE_DIR, "pending_post.json")
+TOKEN_FILE = os.path.join(BASE_DIR, "linkedin_token.json")
+OFFSET_FILE = os.path.join(BASE_DIR, "telegram_offset.json")
+NOTES_TEMPLATE_HEADER = (
+    "<!-- Escreva livremente durante a semana. "
+    "Cada linha vira contexto pro rascunho de sexta. -->\n"
+)
+
+FRIDAY = 4
+
+
+def load_json(path, default):
+    if not os.path.exists(path):
+        return default
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_json(path, data):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def truncate_notes(notes_path):
+    with open(notes_path, "w", encoding="utf-8") as f:
+        f.write(NOTES_TEMPLATE_HEADER)
+
+
+def classify_reply(text):
+    """Interpreta a resposta do usuário: ('aprovar'|'cancelar'|'substituir', texto_substituto|None)."""
+    normalized = text.strip().rstrip("!.,").lower()
+    if normalized in ("aprovar", "aprovado"):
+        return "aprovar", None
+    if normalized == "cancelar":
+        return "cancelar", None
+    return "substituir", text
+
+
+def find_reply(updates, chat_id):
+    """Retorna (texto, next_offset) da 1ª mensagem de texto do chat configurado, ou (None, next_offset)."""
+    next_offset = None
+    for update in updates:
+        next_offset = update["update_id"] + 1
+        message = update.get("message")
+        if not message or "text" not in message:
+            continue
+        if str(message["chat"]["id"]) != str(chat_id):
+            continue
+        return message["text"], next_offset
+    return None, next_offset
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--force", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+
+    if not args.force and datetime.now().weekday() != FRIDAY:
+        return
+
+    pending = load_json(PENDING_POST_FILE, None)
+    if not pending or pending["status"] != "aguardando_aprovacao":
+        return
+
+    from config import NOTES_FILE, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+
+    offset_state = load_json(OFFSET_FILE, {"last_update_id": 0})
+    try:
+        updates = telegram_client.get_updates(TELEGRAM_BOT_TOKEN, offset=offset_state["last_update_id"] + 1)
+    except Exception as e:
+        print(f"[erro] Falha ao consultar o Telegram: {e}")
+        return
+
+    reply_text, next_offset = find_reply(updates, TELEGRAM_CHAT_ID)
+
+    if not args.dry_run and next_offset is not None:
+        save_json(OFFSET_FILE, {"last_update_id": next_offset - 1})
+
+    if reply_text is None:
+        return  # nada novo ainda; próxima checagem em 15 min
+
+    action, replacement_text = classify_reply(reply_text)
+    notes_path = os.path.join(BASE_DIR, NOTES_FILE)
+
+    if action == "cancelar":
+        if args.dry_run:
+            print("[dry-run] Cancelaria o post pendente.")
+            return
+        pending["status"] = "cancelado"
+        save_json(PENDING_POST_FILE, pending)
+        truncate_notes(notes_path)
+        telegram_client.send_message(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, "Post cancelado.")
+        return
+
+    text_to_publish = replacement_text if action == "substituir" else pending["draft_text"]
+
+    if args.dry_run:
+        print(f"[dry-run] Publicaria no LinkedIn:\n{text_to_publish}")
+        return
+
+    token_data = load_json(TOKEN_FILE, None)
+    if not token_data:
+        telegram_client.send_message(
+            TELEGRAM_BOT_TOKEN,
+            TELEGRAM_CHAT_ID,
+            "Não há token do LinkedIn salvo — rode authorize_linkedin.py.",
+        )
+        return
+
+    try:
+        post_urn = linkedin_client.publish_post(
+            token_data["access_token"], token_data["author_urn"], text_to_publish
+        )
+    except requests.HTTPError as e:
+        if e.response is not None and e.response.status_code == 401:
+            telegram_client.send_message(
+                TELEGRAM_BOT_TOKEN,
+                TELEGRAM_CHAT_ID,
+                "Token do LinkedIn expirado — rode authorize_linkedin.py de novo. "
+                "O post continua pendente e será publicado assim que reautorizar.",
+            )
+        else:
+            telegram_client.send_message(
+                TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, f"[erro] Falha ao publicar no LinkedIn: {e}"
+            )
+        return
+    except Exception as e:
+        telegram_client.send_message(
+            TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, f"[erro] Falha ao publicar no LinkedIn: {e}"
+        )
+        return
+
+    pending["status"] = "publicado"
+    pending["linkedin_post_urn"] = post_urn
+    pending["published_at"] = datetime.now().isoformat()
+    save_json(PENDING_POST_FILE, pending)
+    truncate_notes(notes_path)
+    telegram_client.send_message(
+        TELEGRAM_BOT_TOKEN,
+        TELEGRAM_CHAT_ID,
+        f"Publicado! https://www.linkedin.com/feed/update/{post_urn}/",
+    )
+
+
+if __name__ == "__main__":
+    main()
+```
+
+- [ ] **Step 2: Verify — syntax**
+
+Run: `python -m py_compile linkedin-post-bot/check_approval.py`
+Expected: no output, exit code 0.
+
+- [ ] **Step 3: Verify — `classify_reply`, pure function, all branches**
+
+Run:
+```bash
+cd linkedin-post-bot && python -c "
+import check_approval as ca
+
+assert ca.classify_reply('aprovar') == ('aprovar', None)
+assert ca.classify_reply('Aprovar!') == ('aprovar', None)
+assert ca.classify_reply('  aprovado.  ') == ('aprovar', None)
+assert ca.classify_reply('cancelar') == ('cancelar', None)
+assert ca.classify_reply('CANCELAR,') == ('cancelar', None)
+assert ca.classify_reply('na verdade prefiro falar sobre X') == ('substituir', 'na verdade prefiro falar sobre X')
+print('OK')
+"
+```
+Expected: `OK`.
+
+- [ ] **Step 4: Verify — `find_reply`, pure function, with fake update payloads**
+
+Run:
+```bash
+cd linkedin-post-bot && python -c "
+import check_approval as ca
+
+updates = [
+    {'update_id': 10, 'message': {'chat': {'id': 999}, 'text': 'from another chat'}},
+    {'update_id': 11, 'edited_message': {'chat': {'id': 123}, 'text': 'not a plain message'}},
+    {'update_id': 12, 'message': {'chat': {'id': 123}, 'text': 'aprovar'}},
+    {'update_id': 13, 'message': {'chat': {'id': 123}, 'text': 'ignored, already matched above'}},
+]
+text, next_offset = ca.find_reply(updates, '123')
+assert text == 'aprovar', text
+assert next_offset == 13, next_offset   # update_id 12 + 1, stops at the first match
+
+assert ca.find_reply([], '123') == (None, None)
+no_match = [{'update_id': 5, 'message': {'chat': {'id': 999}, 'text': 'nope'}}]
+assert ca.find_reply(no_match, '123') == (None, 6)
+print('OK')
+"
+```
+Expected: `OK`.
+
+- [ ] **Step 5: Verify — real weekday gate, run for real (today is not Friday)**
+
+No mocking: this genuinely exercises `datetime.now().weekday() != FRIDAY` on today's real date. Confirm no `linkedin-post-bot/pending_post.json` or `config.py` exists first (Task 5 Step 5 should already have cleaned up its temp `pending_post.json` — verify it's gone).
+
+Run: `cd linkedin-post-bot && python check_approval.py`
+Expected: no output, exit code 0, no files created or modified (the weekday gate returns before anything else runs — no `config.py` is needed for this path to work).
+
+- [ ] **Step 6: Verify — `--force` bypasses the gate but still needs no config, since there's no pending post**
+
+Run: `cd linkedin-post-bot && python check_approval.py --force`
+Expected: no output, exit code 0 (the "no pending post" check returns before the `from config import ...` line is ever reached).
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add linkedin-post-bot/check_approval.py
+git commit -m "feat: add approval-check and LinkedIn publish script for linkedin-post-bot"
+```
+
+---
+
+### Task 7: Documentation
+
+**Files:**
+- Create: `linkedin-post-bot/README.md`
+- Modify: `README.md:8-18` (root)
+
+- [ ] **Step 1: Write `linkedin-post-bot/README.md`**
+
+```markdown
+# Agendador de Posts do LinkedIn
+
+Toda sexta-feira, gera um rascunho de post sobre o que você andou construindo
+e aprendendo (a partir de `notes.md` + commits recentes no GitHub), manda pra
+você aprovar no Telegram, e publica no LinkedIn via API oficial assim que
+você aprovar.
+
+## 1. Criar o app no LinkedIn Developer Portal
+
+1. Acesse https://www.linkedin.com/developers/apps e crie um novo app.
+   A LinkedIn exige vincular o app a uma Página do LinkedIn — uma página
+   simples sua (pode ser pessoal/de projeto) serve.
+2. Na aba **Products** do app, solicite os dois produtos abaixo (ambos são
+   self-serve, aprovação instantânea):
+   - **Share on LinkedIn** — concede o scope `w_member_social` (publicar em
+     nome do membro).
+   - **Sign In with LinkedIn using OpenID Connect** — concede os scopes
+     `openid` e `profile`, necessários pra descobrir o URN do seu próprio
+     perfil (`GET /v2/userinfo`). Sem esse segundo produto, a autorização
+     roda mas falha ao tentar descobrir quem é o autor do post.
+3. Na aba **Auth**, adicione `http://localhost:8000/callback` como Redirect URL
+   (ou a porta que você configurar em `LINKEDIN_REDIRECT_URI`).
+4. Copie o **Client ID** e o **Client Secret** — vão pro `config.py` (passo 3).
+
+## 2. Instalar dependências
+
+```bash
+cd linkedin-post-bot
+pip install -r requirements.txt
+```
+
+## 3. Configurar
+
+```bash
+cp config.example.py config.py
+cp notes.example.md notes.md
+```
+
+Edite `config.py`:
+- `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` — pode reaproveitar os mesmos do
+  `telegram-jobs-bot`.
+- `ANTHROPIC_API_KEY` — sua chave da API da Claude.
+- `LINKEDIN_CLIENT_ID` / `LINKEDIN_CLIENT_SECRET` — do passo 1.
+- `GITHUB_USERNAME` / `GITHUB_REPOS` — de onde vêm os commits da semana.
+- `POST_SYSTEM_PROMPT` — ajuste o tom/tema se quiser.
+
+`config.py` e `notes.md` não são versionados.
+
+## 4. Autorizar o acesso ao LinkedIn (uma vez)
+
+```bash
+python authorize_linkedin.py
+```
+
+Abre o navegador, você faz login e autoriza o app. O token fica salvo em
+`linkedin_token.json` e vale por ~60 dias. Quando expirar, os scripts
+avisam no Telegram pra você rodar esse comando de novo.
+
+## 5. Testar sem publicar de verdade
+
+```bash
+python generate_post.py --dry-run    # gera e imprime o rascunho
+python check_approval.py --force --dry-run   # mostra o que seria publicado
+```
+
+## 6. Automatizar
+
+```
+# Sexta 17h — gera o rascunho e manda pra aprovação
+0 17 * * 5 cd /caminho/para/LinkendIn-Bot/linkedin-post-bot && python3 generate_post.py
+
+# A cada 15 min — publica assim que você aprovar (só age às sextas)
+*/15 * * * * cd /caminho/para/LinkendIn-Bot/linkedin-post-bot && python3 check_approval.py
+```
+
+Se você aprovar depois de sexta (ex: sábado), rode manualmente:
+```bash
+python check_approval.py --force
+```
+
+## Checklist de teste manual (antes de confiar no cron)
+
+- [ ] `python authorize_linkedin.py` completa e salva `linkedin_token.json`
+- [ ] `python generate_post.py --dry-run` gera um rascunho que faz sentido
+- [ ] `python generate_post.py` (sem `--dry-run`) manda o rascunho real pro
+      Telegram
+- [ ] Responder "aprovar" e rodar `python check_approval.py --force` publica
+      de verdade no LinkedIn — confira o link que o bot manda de volta
+- [ ] Repetir gerando um novo rascunho e respondendo "cancelar" — confirme
+      que nada é publicado
+- [ ] Repetir gerando um novo rascunho e respondendo com um texto qualquer —
+      confirme que esse texto (não o rascunho original) é o que é publicado
+
+## Manutenção
+
+- Token do LinkedIn expira a cada ~60 dias — reautorize quando avisado.
+- `LINKEDIN_API_VERSION` em `linkedin_client.py` pode precisar de atualização
+  periódica — se as chamadas começarem a falhar, confira a versão atual em
+  https://learn.microsoft.com/en-us/linkedin/marketing/community-management/shares/posts-api
+```
+
+- [ ] **Step 2: Update the root `README.md`**
+
+Read `README.md:8-18` first, then replace the "Módulo 2" section:
+
+Old:
+```markdown
+### 2. Agendador de postagem semanal — 🚧 próximo passo
+
+Ainda não iniciado. Direções possíveis: usar a API oficial do LinkedIn
+(`w_member_social`, via app registrado no LinkedIn Developer Portal) ou,
+como alternativa mais simples, uma ferramenta de agendamento pronta
+(Buffer, Hootsuite, Publer) ou o agendamento nativo do próprio LinkedIn.
+```
+
+New:
+```markdown
+### 2. Agendador de posts do LinkedIn — ✅ pronto (requer setup manual do LinkedIn App)
+
+Fica em [`linkedin-post-bot/`](linkedin-post-bot/). Toda sexta, gera um
+rascunho de post (a partir de anotações da semana + commits recentes do
+GitHub, via API da Claude), manda pra aprovação no Telegram, e publica no
+LinkedIn através da API oficial (`w_member_social`) assim que aprovado —
+sem SaaS de terceiros, sem scraping. Veja o
+[README do módulo](linkedin-post-bot/README.md) para o setup (requer criar
+um app no LinkedIn Developer Portal — único passo manual).
+```
+
+- [ ] **Step 3: Verify**
+
+Run: `git diff README.md` — confirm only the Módulo 2 section changed.
+Run: `python -m py_compile linkedin-post-bot/*.py` (or compile each file
+individually if the shell doesn't glob) — expect no output, exit 0, covering
+every script written so far including this chunk's two.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add linkedin-post-bot/README.md README.md
+git commit -m "docs: add linkedin-post-bot module README and update root README"
+```
+
+---
+
+### Task 8: Final integration pass
+
+**Files:** none new — verification only.
+
+- [ ] **Step 1: Compile every file in the module together**
+
+Run:
+```bash
+cd linkedin-post-bot && python -m py_compile telegram_client.py linkedin_client.py authorize_linkedin.py generate_post.py check_approval.py
+```
+Expected: no output, exit code 0.
+
+- [ ] **Step 2: Confirm no leftover test artifacts from earlier steps**
+
+Run: `ls linkedin-post-bot/` — expect exactly: `telegram_client.py`,
+`linkedin_client.py`, `authorize_linkedin.py`, `generate_post.py`,
+`check_approval.py`, `config.example.py`, `notes.example.md`,
+`requirements.txt`, `README.md`, plus any `__pycache__/` (gitignored by the
+existing root `.gitignore` `__pycache__/` rule). No `config.py`, `notes.md`,
+`pending_post.json`, `telegram_offset.json`, or `linkedin_token.json` should
+be present — those only get created by a real user setup, and Task 5 Step 5's
+temp `pending_post.json` should already have been deleted per its own
+instructions. If any of the five gitignored files are present from testing,
+delete them now.
+
+- [ ] **Step 3: Confirm `git status` is clean of anything unexpected**
+
+Run: `git status`
+Expected: clean working tree (everything from Tasks 5-7 already committed) — if anything unstaged remains from a verification step's side effect, review it before deciding whether to commit or discard it.
+
+- [ ] **Step 4: Push**
+
+```bash
+git push origin claude/initial-repo-commit-1fqgx9
+```
+
