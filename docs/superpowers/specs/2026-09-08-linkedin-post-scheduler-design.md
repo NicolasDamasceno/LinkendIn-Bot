@@ -81,17 +81,26 @@ between invocations (see §7).
    c. Poll Telegram (`getUpdates`, using the stored offset in
       `telegram_offset.json` to avoid reprocessing) for a message from
       `TELEGRAM_CHAT_ID` sent after the draft was posted.
-   d. If a qualifying reply is found, act on it (§10) and update
-      `pending_post.json` to `status: "publicado"` or `"cancelado"`.
+   d. If a qualifying reply is found, act on it (§10), update
+      `pending_post.json` to `status: "publicado"` or `"cancelado"`, and —
+      as part of the same step — truncate `notes.md` back to the template
+      header (§5), so next week starts with a clean slate regardless of
+      the outcome.
    e. If the LinkedIn API call fails (including an expired token), send a
       Telegram error message describing what happened and leave
       `pending_post.json` at `status: "aguardando_aprovacao"` so the next
       15-minute run retries.
 
+   **`--force` flag:** bypasses the weekday check in step (a) so a manual
+   invocation works on any day — this is how the "known limitation" below
+   is actually resolved.
+
    **Known limitation (explicitly accepted by the user):** if the user
-   approves after Friday (e.g. Saturday), `check_approval.py` will not pick
-   it up automatically — it only processes on Fridays. The user runs
-   `python check_approval.py` manually in that case. This is intentional,
+   approves after Friday (e.g. Saturday), the cron-triggered
+   `check_approval.py` will not pick it up automatically — the cron-fired
+   runs process only on Fridays. The user runs
+   `python check_approval.py --force` manually in that case, which skips
+   step (a) and proceeds straight to steps (b)-(e). This is intentional,
    not a bug.
 
 3. **One-time / occasional** — `authorize_linkedin.py`: run manually
@@ -106,6 +115,7 @@ TELEGRAM_CHAT_ID = "SEU_CHAT_ID_AQUI"
 
 # Claude API — drafts the post text
 ANTHROPIC_API_KEY = "SUA_CHAVE_AQUI"
+CLAUDE_MODEL = "claude-opus-5"               # troque aqui se quiser um modelo mais barato
 
 # LinkedIn API — from the app created in the LinkedIn Developer Portal (§8)
 LINKEDIN_CLIENT_ID = "..."
@@ -143,9 +153,11 @@ user jots during the week:
 ```
 
 The real `notes.md` is gitignored and starts empty (or copied from the
-example) after each successful post — `generate_post.py` truncates it back
-to the template header once a post reaches `status: "publicado"` or
-`"cancelado"`, so old notes don't bleed into next week's draft.
+example). `check_approval.py` truncates it back to the template header the
+moment it resolves `pending_post.json` to `"publicado"` or `"cancelado"`
+(§3.2.d) — not `generate_post.py` — so old notes don't bleed into next
+week's draft, and the truncation happens exactly once per cycle, at
+resolution time rather than at the next generation time.
 
 ## 6. GitHub Commit Fetching
 
@@ -167,6 +179,14 @@ module 1, which log and continue on a single source's failure).
 Only the commit `message` (first line) and repo name are passed to Claude —
 not full diffs, to keep the prompt small and avoid leaking code content
 into a public-facing post.
+
+**Accepted trade-off:** the lookback window is always a rolling 7 days from
+"now," not from the last successful post. If a Friday is skipped (§3.1.a,
+prior draft still pending) or `check_approval.py` needs a manual
+`--force` run days later, commits older than 7 days at that point can fall
+outside the window and never make it into any draft — unlike `notes.md`,
+whose content persists untouched until a draft is actually resolved. This
+is accepted as-is; the window does not expand to cover skipped weeks.
 
 ## 7. State Files (all gitignored, live in `linkedin-post-bot/`)
 
@@ -200,6 +220,13 @@ reprocesses an old message (standard Telegram long-polling pattern).
 ```
 `refresh_token` is `null` unless LinkedIn grants one for this app's product
 access (not guaranteed for self-serve "Share on LinkedIn" access — see §8).
+
+`expires_at` is written but checked only reactively (§8: a 401 from the
+LinkedIn API is what triggers the re-authorization prompt) — no script
+reads `expires_at` proactively to warn before expiry. This is intentional,
+not an oversight: it keeps both scripts simpler, and the 401-triggered flow
+already surfaces the problem the same day it would first matter (the next
+scheduled publish attempt).
 
 ## 8. LinkedIn API Setup & Authorization
 
@@ -278,13 +305,23 @@ Responda:
 
 **Interpretation by `check_approval.py`** (first qualifying message from
 `TELEGRAM_CHAT_ID` after `pending_post.json.created_at` wins; later
-messages that same day are ignored once resolved):
-- Case-insensitive `"aprovar"` (or `"aprovado"`) → publish `draft_text`
-  as-is.
-- Case-insensitive `"cancelar"` → mark `"cancelado"`, no LinkedIn call,
-  confirms cancellation back to the user.
+messages that same day are ignored once resolved). Matching rule: trim
+whitespace, strip trailing punctuation (`!`, `.`, `,`), fold case — so
+`"Aprovar!"` and `"aprovar."` both count as approval, not as replacement
+text:
+- Matches `"aprovar"` or `"aprovado"` under the rule above → publish
+  `draft_text` as-is.
+- Matches `"cancelar"` under the rule above → mark `"cancelado"`, no
+  LinkedIn call, confirms cancellation back to the user.
 - Anything else → treat the message text itself as the replacement post
   text and publish *that* instead of `draft_text`.
+
+**Accepted risk:** because this is a single-user personal tool, there is no
+confirmation step before publishing replacement text — if the user's reply
+doesn't match the approve/cancel keywords (even a typo, or an unrelated
+message sent to the same chat), it gets published to LinkedIn verbatim.
+This trade-off is deliberate, the same way the Friday-only check in §3.2 is
+— not an oversight.
 
 This reuses the same `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` as
 `telegram-jobs-bot`, but as a separate `getUpdates` consumer with its own
@@ -305,9 +342,17 @@ directly to Telegram, not just logged:
 | GitHub API error for one repo | Log, skip that repo, continue with the rest |
 | GitHub API error for all repos + empty notes | Falls into the "nothing to post" case (§3.1.c) |
 | Claude API error | Telegram message: draft generation failed, with the error; no `pending_post.json` written; next Friday retries normally |
-| Telegram send failure during `generate_post.py` | Logged to stdout (cron log) — there's no fallback channel if Telegram itself is down |
+| Telegram send failure during `generate_post.py` | Logged to stdout (cron log) only — `pending_post.json` is **not** written in this case, so `check_approval.py` never polls for approval of a draft the user never actually saw. There's no fallback channel if Telegram itself is down; next Friday retries normally. |
 | LinkedIn publish error (non-auth) | Telegram message with the error; `pending_post.json` stays `"aguardando_aprovacao"`; retried on the next 15-minute run |
 | LinkedIn 401 (expired token) | Telegram message asking to re-run `authorize_linkedin.py`; same retry-on-next-run behavior |
+
+**Overlap note:** `generate_post.py` (17:00 Friday) and a `check_approval.py`
+tick (`*/15`, including the one at 17:00) can fire in the same minute. This
+is not a race worth guarding against: `generate_post.py` only ever writes
+`pending_post.json` when none exists in `"aguardando_aprovacao"` state
+(§3.1.a), and `check_approval.py` only ever acts on an *existing* one — so
+the two either don't touch the same file in that tick, or `check_approval.py`
+simply finds nothing to act on yet. No locking is introduced for this.
 
 ## 12. Security & Secrets
 
