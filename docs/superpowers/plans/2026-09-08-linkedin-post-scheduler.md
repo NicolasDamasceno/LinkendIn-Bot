@@ -1067,7 +1067,7 @@ Expected: `OK`.
 
 - [ ] **Step 5: Verify — real weekday gate, run for real (today is not Friday)**
 
-No mocking: this genuinely exercises `datetime.now().weekday() != FRIDAY` on today's real date. Confirm no `linkedin-post-bot/pending_post.json` or `config.py` exists first (Task 5 Step 5 should already have cleaned up its temp `pending_post.json` — verify it's gone).
+No mocking: this genuinely exercises `datetime.now().weekday() != FRIDAY` on today's real date. Confirm no `linkedin-post-bot/pending_post.json` or `config.py` exists first (Task 5 Step 6 should already have cleaned up its temp `pending_post.json` — verify it's gone).
 
 Run: `cd linkedin-post-bot && python check_approval.py`
 Expected: no output, exit code 0, no files created or modified (the weekday gate returns before anything else runs — no `config.py` is needed for this path to work).
@@ -1259,7 +1259,7 @@ Run: `ls linkedin-post-bot/` — expect exactly: `telegram_client.py`,
 `requirements.txt`, `README.md`, plus any `__pycache__/` (gitignored by the
 existing root `.gitignore` `__pycache__/` rule). No `config.py`, `notes.md`,
 `pending_post.json`, `telegram_offset.json`, or `linkedin_token.json` should
-be present — those only get created by a real user setup, and Task 5 Step 5's
+be present — those only get created by a real user setup, and Task 5 Step 6's
 temp `pending_post.json` should already have been deleted per its own
 instructions. If any of the five gitignored files are present from testing,
 delete them now.
