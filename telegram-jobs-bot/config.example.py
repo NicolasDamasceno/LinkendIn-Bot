@@ -43,9 +43,10 @@ LOCATION_KEYWORDS = [
     "Brasil",
 ]
 
-# (opcional) Funil de senioridade: a vaga só passa se o título ou a
-# descrição citarem um destes termos. Deixe a lista vazia [] para não
-# filtrar por nível (por exemplo, quando você não for mais júnior).
+# (opcional) Funil de senioridade/tipo de contrato: a vaga só passa se o
+# título ou a descrição citarem um destes termos. Deixe a lista vazia []
+# para não filtrar por nível/tipo (por exemplo, quando você não for mais
+# júnior ou quiser ver vagas CLT também).
 SENIORITY_KEYWORDS = [
     "Júnior",
     "Junior",
@@ -54,4 +55,10 @@ SENIORITY_KEYWORDS = [
     "Estágio",
     "Entry level",
     "Entry-level",
+    # Freelance / PJ
+    "Freelance",
+    "Freelancer",
+    "Freela",
+    "PJ",
+    "Contrato PJ",
 ]
