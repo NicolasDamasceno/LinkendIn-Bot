@@ -243,7 +243,9 @@ not automated):**
 **`authorize_linkedin.py` (run once, and again after token expiry):**
 - Builds the LinkedIn OAuth 2.0 authorization URL (`response_type=code`,
   `client_id`, `redirect_uri=http://localhost:8000/callback`,
-  `scope=w_member_social ...`) and prints/opens it.
+  `scope=w_member_social ...`, plus a random `state` value for CSRF
+  protection, checked against the value echoed back on the callback) and
+  prints/opens it.
 - Starts a temporary local HTTP server (Python stdlib `http.server`, no new
   dependency) bound to `localhost:8000` to catch the OAuth redirect.
 - User logs into LinkedIn in their browser and authorizes the app; LinkedIn
@@ -275,9 +277,11 @@ not a design decision.
 Single, non-streaming Claude API call (see the `claude-api` skill's
 Python reference for exact SDK usage at implementation time):
 
-- **Model:** `claude-opus-5` (project default; user may override in
-  `config.py` if they want a cheaper model — cost is negligible at this
-  volume, one call per week).
+- **Model:** `CLAUDE_MODEL` from `config.py` (§4), default `claude-opus-5`
+  — user may override to a cheaper model; cost is negligible at this volume
+  (one call per week) either way. The exact model id string will be
+  verified against current Anthropic documentation at implementation time,
+  same caution as the LinkedIn endpoint in §8.
 - **System prompt:** `POST_SYSTEM_PROMPT` from `config.py` (§4).
 - **User message:** the week's `notes.md` content + the fetched commit list
   (repo name + message, per §6), clearly labeled as two separate sources.
@@ -345,6 +349,7 @@ directly to Telegram, not just logged:
 | Telegram send failure during `generate_post.py` | Logged to stdout (cron log) only — `pending_post.json` is **not** written in this case, so `check_approval.py` never polls for approval of a draft the user never actually saw. There's no fallback channel if Telegram itself is down; next Friday retries normally. |
 | LinkedIn publish error (non-auth) | Telegram message with the error; `pending_post.json` stays `"aguardando_aprovacao"`; retried on the next 15-minute run |
 | LinkedIn 401 (expired token) | Telegram message asking to re-run `authorize_linkedin.py`; same retry-on-next-run behavior |
+| Telegram failure *within* `check_approval.py` itself (`getUpdates` fails, or an error notification fails to send) | Falls through to the stdout/cron log, same as any other transient failure; `pending_post.json` is left untouched, so the next 15-minute tick retries the whole check |
 
 **Overlap note:** `generate_post.py` (17:00 Friday) and a `check_approval.py`
 tick (`*/15`, including the one at 17:00) can fire in the same minute. This
