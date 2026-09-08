@@ -42,3 +42,16 @@ LOCATION_KEYWORDS = [
     "Remoto",
     "Brasil",
 ]
+
+# (opcional) Funil de senioridade: a vaga só passa se o título ou a
+# descrição citarem um destes termos. Deixe a lista vazia [] para não
+# filtrar por nível (por exemplo, quando você não for mais júnior).
+SENIORITY_KEYWORDS = [
+    "Júnior",
+    "Junior",
+    "Jr",
+    "Trainee",
+    "Estágio",
+    "Entry level",
+    "Entry-level",
+]

@@ -20,7 +20,13 @@ from datetime import datetime
 
 import requests
 
-from config import KEYWORDS, LOCATION_KEYWORDS, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+from config import (
+    KEYWORDS,
+    LOCATION_KEYWORDS,
+    SENIORITY_KEYWORDS,
+    TELEGRAM_BOT_TOKEN,
+    TELEGRAM_CHAT_ID,
+)
 
 SENT_JOBS_FILE = os.path.join(os.path.dirname(__file__), "sent_jobs.json")
 
@@ -139,9 +145,11 @@ def main():
     for job in all_jobs:
         if job["id"] in sent_jobs:
             continue
-        text_blob = f"{job['title']} {job['description']} {job['location']}"
-        if matches_keywords(f"{job['title']} {job['description']}", KEYWORDS) and (
-            not LOCATION_KEYWORDS or matches_keywords(job["location"], LOCATION_KEYWORDS)
+        title_and_description = f"{job['title']} {job['description']}"
+        if (
+            matches_keywords(title_and_description, KEYWORDS)
+            and (not LOCATION_KEYWORDS or matches_keywords(job["location"], LOCATION_KEYWORDS))
+            and (not SENIORITY_KEYWORDS or matches_keywords(title_and_description, SENIORITY_KEYWORDS))
         ):
             new_matches.append(job)
 

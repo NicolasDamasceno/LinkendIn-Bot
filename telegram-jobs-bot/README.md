@@ -43,6 +43,9 @@ Depois abra `config.py` e edite:
 - `TELEGRAM_BOT_TOKEN` e `TELEGRAM_CHAT_ID`: dados obtidos nos passos 1 e 2
 - `KEYWORDS`: palavras-chave do seu perfil (cargo, tecnologias, área)
 - `LOCATION_KEYWORDS`: filtro de localização (ou `[]` para não filtrar)
+- `SENIORITY_KEYWORDS`: funil de senioridade — a vaga só passa se citar um
+  desses termos (ex: "Júnior", "Trainee", "Estágio"). Deixe `[]` para não
+  filtrar por nível (útil quando você não for mais júnior)
 
 `config.py` não é versionado (está no `.gitignore`), então seus dados
 ficam só na sua máquina.
