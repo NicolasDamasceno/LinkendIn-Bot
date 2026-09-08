@@ -8,10 +8,17 @@ os Termos de Uso da plataforma (sem scraping nem automação de ações na conta
 ### 1. Bot de vagas para Telegram — ✅ pronto
 
 Fica em [`telegram-jobs-bot/`](telegram-jobs-bot/). Busca vagas nas APIs
-públicas do **RemoteOK** e **Arbeitnow**, filtra pelas palavras-chave do seu
-perfil e envia as novidades para o seu Telegram, evitando repetir vagas já
-enviadas. Veja o [README do módulo](telegram-jobs-bot/README.md) para
-instruções de configuração e uso.
+públicas do **RemoteOK**, **Arbeitnow** e **Remotive** (esta última já marca
+o tipo de contrato de cada vaga — CLT, freelance, contrato — permitindo
+filtrar trabalhos freelancer), filtra pelas palavras-chave do seu perfil e
+envia as novidades para o seu Telegram, evitando repetir vagas já enviadas.
+Veja o [README do módulo](telegram-jobs-bot/README.md) para instruções de
+configuração e uso.
+
+**Workana, 99Freelas e Upwork ficaram de fora**: nenhuma das três oferece
+API pública de busca de vagas sem autenticação, e fazer scraping violaria os
+Termos de Uso — a mesma razão pela qual este projeto não faz scraping do
+LinkedIn.
 
 Para vagas específicas do LinkedIn, a alternativa recomendada é usar o
 alerta de vaga nativo por e-mail do LinkedIn e encaminhar esses e-mails para

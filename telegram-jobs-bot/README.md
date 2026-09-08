@@ -1,13 +1,16 @@
 # Bot de Vagas para Telegram
 
-Busca vagas em fontes públicas (RemoteOK e Arbeitnow), filtra pelo seu perfil
-e envia as novidades direto no seu Telegram.
+Busca vagas em fontes públicas (RemoteOK, Arbeitnow e Remotive), filtra pelo
+seu perfil e envia as novidades direto no seu Telegram.
 
-> **Por que não busca direto no LinkedIn?** O LinkedIn não oferece uma API
-> pública de vagas para aplicações de terceiros, e raspar (fazer scraping)
-> o site viola os Termos de Uso da plataforma, com risco de bloqueio da
-> sua conta. Por isso este bot usa fontes abertas e legítimas. Se quiser
-> vagas específicas do LinkedIn, veja a seção "Vagas do LinkedIn" no final.
+> **Por que não busca direto no LinkedIn, Workana, 99Freelas ou Upwork?**
+> Nenhuma dessas plataformas oferece uma API pública de busca de vagas sem
+> autenticação (a da Upwork exige OAuth e só enxerga dados da sua própria
+> conta), e raspar (fazer scraping) o site viola os Termos de Uso, com risco
+> de bloqueio da conta. Por isso este bot usa fontes abertas e legítimas.
+> Para vagas freelance/contrato, a Remotive já marca esse tipo em cada vaga
+> ("freelance", "contract"). Se quiser vagas específicas do LinkedIn, veja a
+> seção "Vagas do LinkedIn" no final.
 
 ## 1. Criar o bot no Telegram
 
@@ -61,15 +64,19 @@ match. Nas próximas execuções, só manda o que for **novo**.
 
 ## 6. Automatizar (rodar sozinho de tempos em tempos)
 
+> A API da Remotive pede, nos próprios termos de uso, no máximo ~4 chamadas
+> por dia. Por isso o exemplo abaixo roda a cada 6 horas — evite deixar o
+> intervalo bem mais curto que isso.
+
 **Linux/Mac (cron):** edite o crontab com `crontab -e` e adicione, por
-exemplo, para rodar a cada 2 horas:
+exemplo, para rodar a cada 6 horas:
 
 ```
-0 */2 * * * cd /caminho/para/LinkendIn-Bot/telegram-jobs-bot && /usr/bin/python3 bot.py
+0 */6 * * * cd /caminho/para/LinkendIn-Bot/telegram-jobs-bot && /usr/bin/python3 bot.py
 ```
 
 **Windows:** use o Agendador de Tarefas para rodar `bot.py` no intervalo
-desejado.
+desejado (mesma recomendação: a cada 6 horas ou mais).
 
 ## Vagas do LinkedIn
 

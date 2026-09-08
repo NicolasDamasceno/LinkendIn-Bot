@@ -38,9 +38,12 @@ KEYWORDS = [
 
 # (opcional) Se quiser, pode adicionar um segundo filtro por localização.
 # Deixe a lista vazia [] para não filtrar por local.
+# "Worldwide" está aqui porque a Remotive usa esse termo (em vez de
+# "Remoto") para vagas abertas a qualquer país.
 LOCATION_KEYWORDS = [
     "Remoto",
     "Brasil",
+    "Worldwide",
 ]
 
 # (opcional) Funil de senioridade/tipo de contrato: a vaga só passa se o
